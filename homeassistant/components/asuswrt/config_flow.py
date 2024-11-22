@@ -205,8 +205,8 @@ class AsusWrtFlowHandler(ConfigFlow, domain=DOMAIN):
             )
             error = RESULT_UNKNOWN
 
-        if error is None:
-            if not api.is_connected:
+        if error is None and not api.is_connected:
+
                 _LOGGER.error(
                     "Error connecting to the AsusWrt router at %s using protocol %s",
                     host,
