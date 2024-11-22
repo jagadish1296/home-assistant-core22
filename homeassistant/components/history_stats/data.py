@@ -107,8 +107,7 @@ class HistoryStats:
             )
         ):
             new_data = False
-            if event and (new_state := event.data["new_state"]) is not None:
-                if (
+            if event and (new_state := event.data["new_state"]) is not None and (
                     current_period_start_timestamp
                     <= floored_timestamp(new_state.last_changed)
                     <= current_period_end_timestamp

@@ -66,8 +66,8 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         # This means the user has downgraded from a future version
         return False
 
-    if config_entry.version == 1:
-        if config_entry.minor_version < 2:
+    if config_entry.version == 1 and config_entry.minor_version < 2:
+
             new = {**config_entry.data}
             fyta = FytaConnector(
                 config_entry.data[CONF_USERNAME], config_entry.data[CONF_PASSWORD]
