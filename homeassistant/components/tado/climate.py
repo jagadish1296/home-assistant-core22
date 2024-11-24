@@ -402,10 +402,11 @@ class TadoClimate(TadoZoneEntity, ClimateEntity):
         """Return the current preset mode (home, away or auto)."""
 
         if (
-            self._tado_geofence_data is not None
-            and "presenceLocked" in self._tado_geofence_data
-        ):
-            if not self._tado_geofence_data["presenceLocked"]:
+    self._tado_geofence_data is not None
+    and "presenceLocked" in self._tado_geofence_data
+    and not self._tado_geofence_data["presenceLocked"]
+):
+
                 return PRESET_AUTO
         if self._tado_zone_data.is_away:
             return PRESET_AWAY

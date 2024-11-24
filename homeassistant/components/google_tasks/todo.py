@@ -1,10 +1,6 @@
-"""Google Tasks todo platform."""
-
-from __future__ import annotations
-
 from datetime import date, datetime, timedelta
 from typing import Any, cast
-
+import re
 from homeassistant.components.todo import (
     TodoItem,
     TodoItemStatus,
@@ -16,7 +12,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
-
 from .api import AsyncConfigEntryAuth
 from .const import DOMAIN
 from .coordinator import TaskUpdateCoordinator
@@ -29,9 +24,42 @@ TODO_STATUS_MAP = {
 }
 TODO_STATUS_MAP_INV = {v: k for k, v in TODO_STATUS_MAP.items()}
 
+DATE_PATTERNS = [
+    (r"\d{4}/\d{2}/\d{2}", "%Y/%m/%d"),
+    (r"\d{2}/\d{2}/\d{4}", "%d/%m/%Y"),
+    (r"\d{2}/\d{2}/\d{4}", "%m/%d/%Y"),
+    (
+        r"\d{1,2}\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{4}",
+        "%d %b %Y",
+    ),
+    (
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{1,2},?\s\d{4}",
+        "%b %d %Y",
+    ),
+    (
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{1,2}\s\d{4}",
+        "%b %d %Y",
+    ),
+    (
+        r"\d{4}\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{1,2}",
+        "%Y %b %d",
+    ),
+    (
+        r"\d{4}\s\d{1,2}\s(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)",
+        "%Y %d %b",
+    ),
+]
+
+TIME_PATTERN = r"(\d{1,2}:\d{2}(?:\s?[AP]M)?)"
+
+
+def _format_due_datetime(due: datetime) -> str:
+    """Format due datetime for Google Tasks API."""
+    return due.isoformat() + "Z"
+
 
 def _convert_todo_item(item: TodoItem) -> dict[str, str | None]:
-    """Convert TodoItem dataclass items to dictionary of attributes the tasks API."""
+    """Convert TodoItem dataclass items to dictionary of attributes for the tasks API."""
     result: dict[str, str | None] = {}
     result["title"] = item.summary
     if item.status is not None:
@@ -39,19 +67,56 @@ def _convert_todo_item(item: TodoItem) -> dict[str, str | None]:
     else:
         result["status"] = TodoItemStatus.NEEDS_ACTION
     if (due := item.due) is not None:
-        # due API field is a timestamp string, but with only date resolution
-        result["due"] = dt_util.start_of_local_day(due).isoformat()
+        result["due"] = _format_due_datetime(dt_util.as_utc(due))
     else:
         result["due"] = None
-    result["notes"] = item.description
+    result["notes"] = item.description if item.description else None
     return result
+
+
+def _extract_date_time(text: str) -> tuple[datetime | None, str | None]:
+    """Extract date and time from text."""
+    date_match = None
+    extracted_date = None
+    for pattern, date_format in DATE_PATTERNS:
+        if match := re.search(pattern, text):
+            date_match = match.group()
+            try:
+                extracted_date = datetime.strptime(date_match, date_format)
+                break
+            except ValueError:
+                continue
+
+    time_match = re.search(TIME_PATTERN, text)
+    extracted_time = time_match.group() if time_match else None
+
+    if extracted_date and extracted_time:
+        try:
+            if "AM" in extracted_time or "PM" in extracted_time:
+                time_obj = datetime.strptime(extracted_time.strip(), "%I:%M %p")
+            else:
+                time_obj = datetime.strptime(extracted_time.strip(), "%H:%M")
+            extracted_date = extracted_date.replace(
+                hour=time_obj.hour, minute=time_obj.minute
+            )
+        except ValueError:
+            pass
+
+    return extracted_date, extracted_time
 
 
 def _convert_api_item(item: dict[str, str]) -> TodoItem:
     """Convert tasks API items into a TodoItem."""
-    due: date | None = None
+    due: datetime | None = None
     if (due_str := item.get("due")) is not None:
-        due = datetime.fromisoformat(due_str).date()
+        due = dt_util.parse_datetime(due_str)
+    else:
+        title = item.get("title", "")
+        notes = item.get("notes", "")
+        extracted_datetime, _ = _extract_date_time(f"{title} {notes}")
+        if extracted_datetime:
+            due = extracted_datetime
+
     return TodoItem(
         summary=item["title"],
         uid=item["id"],
@@ -97,6 +162,7 @@ class GoogleTaskTodoListEntity(
         | TodoListEntityFeature.MOVE_TODO_ITEM
         | TodoListEntityFeature.SET_DUE_DATE_ON_ITEM
         | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+        | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
     )
 
     def __init__(
@@ -106,7 +172,7 @@ class GoogleTaskTodoListEntity(
         config_entry_id: str,
         task_list_id: str,
     ) -> None:
-        """Initialize LocalTodoListEntity."""
+        """Initialize GoogleTaskTodoListEntity."""
         super().__init__(coordinator)
         self._attr_name = name.capitalize()
         self._attr_unique_id = f"{config_entry_id}-{task_list_id}"
@@ -130,12 +196,29 @@ class GoogleTaskTodoListEntity(
     async def async_update_todo_item(self, item: TodoItem) -> None:
         """Update a To-do item."""
         uid: str = cast(str, item.uid)
-        await self.coordinator.api.patch(
-            self._task_list_id,
-            uid,
-            task=_convert_todo_item(item),
-        )
-        await self.coordinator.async_refresh()
+        existing_item = next((i for i in self.coordinator.data if i["id"] == uid), None)
+        if existing_item:
+            updated_item = _convert_todo_item(item)
+
+            # Extract date and time from updated title or description
+            extracted_datetime, _ = _extract_date_time(
+                f"{item.summary} {item.description or ''}"
+            )
+            if extracted_datetime:
+                updated_item["due"] = _format_due_datetime(
+                    dt_util.as_utc(extracted_datetime)
+                )
+            elif item.due:
+                updated_item["due"] = _format_due_datetime(dt_util.as_utc(item.due))
+            else:
+                updated_item["due"] = None
+
+            await self.coordinator.api.patch(
+                self._task_list_id,
+                uid,
+                task=updated_item,
+            )
+            await self.coordinator.async_refresh()
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
         """Delete To-do items."""
@@ -151,13 +234,8 @@ class GoogleTaskTodoListEntity(
 
 
 def _order_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Order the task items response.
-
-    All tasks have an order amongst their sibblings based on position.
-
-        Home Assistant To-do items do not support the Google Task parent/sibbling
-    relationships and the desired behavior is for them to be filtered.
-    """
+    """Order the task items response."""
     parents = [task for task in tasks if task.get("parent") is None]
     parents.sort(key=lambda task: task["position"])
     return parents
+

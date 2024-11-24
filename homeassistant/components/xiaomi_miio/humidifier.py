@@ -359,15 +359,14 @@ class XiaomiAirHumidifierMiot(XiaomiAirHumidifier):
             _LOGGER.warning("Mode %s is not a valid operation mode", mode)
             return
 
-        _LOGGER.debug("Setting the operation mode to: %s", mode)
-        if self._state:
-            if await self._try_command(
-                OPERATION_MODE_FAILED,
-                self._device.set_mode,
-                self.REVERSE_MODE_MAPPING[mode],
-            ):
-                self._mode = self.REVERSE_MODE_MAPPING[mode].value
-                self.async_write_ha_state()
+        if self._state and await self._try_command:
+            _LOGGER.debug("Setting the operation mode to: %s", mode)
+
+            OPERATION_MODE_FAILED,
+            self._device.set_mode,
+            self.REVERSE_MODE_MAPPING[mode],
+            self._mode = self.REVERSE_MODE_MAPPING[mode].value
+            self.async_write_ha_state()
 
 
 class XiaomiAirHumidifierMjjsq(XiaomiAirHumidifier):
